@@ -1,0 +1,39 @@
+
+# Images de calibration
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.tiff
+
+# Vidéos
+*.mp4
+*.avi
+*.mov
+
+# Fichiers de résultats volumineux
+results/
+*.npy
+*.pkl
+
+# Paramètres de calibration (optionnel si tu veux les garder)
+# calibration_params/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
