@@ -8,6 +8,8 @@ import time
 SEG_MODEL_PATH = "massyl/seg_models/stdc813m_maxmiou_4.onnx"
 OD_MODEL_PATH  = "massyl/od_models/yolov8s_best_2.onnx"
 VIDEO_SOURCE   = "massyl/data/videos/video_laf_left.mp4" 
+# "massyl/data/bdd100k_test/*.jpg"
+# "massyl/data/lost_and_found_left_od_optimized/valid/images/*.jpg"
 
 # Model Settings
 SEG_INPUT_SIZE = (1024, 512)
