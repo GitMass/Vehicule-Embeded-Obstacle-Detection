@@ -3,13 +3,17 @@ import numpy as np
 import onnxruntime as ort
 import os
 import time
+from datetime import datetime
 
 # --- CONFIGURATION ---
 SEG_MODEL_PATH = "massyl/seg_models/stdc813m_maxmiou_4.onnx"
 OD_MODEL_PATH  = "massyl/od_models/yolov8s_best_2.onnx"
-VIDEO_SOURCE   = "massyl/data/videos/video_laf_left.mp4" 
-# "massyl/data/bdd100k_test/*.jpg"
-# "massyl/data/lost_and_found_left_od_optimized/valid/images/*.jpg"
+VIDEO_SOURCE   = "massyl/data/final_demo/*.jpg" 
+
+# Output Settings
+LOG_FILE_PATH   = "massyl/results/flagged_frames.txt"
+MASK_OUTPUT_DIR = "massyl/results/flagged_masks"
+TARGET_FPS      = 3  # The script will try to run at this speed
 
 # Model Settings
 SEG_INPUT_SIZE = (1024, 512)
@@ -19,17 +23,35 @@ IOU_THRESHOLD  = 0.45
 
 # Decision Logic
 ROAD_OVERLAP_THRESHOLD = 0.1
-ALERT_COOLDOWN = 5.0
+ALERT_COOLDOWN = 12.0
 
 class FusionPipeline:
     def __init__(self):
         self.init_models()
+        self.setup_outputs()
         self.last_alert_time = 0
         
         # Colors
         self.color_road_obs = (0, 255, 0)   # Green
         self.color_ignored  = (0, 0, 255)   # Red
         self.color_intrsct  = (255, 0, 255) # Purple (Intersection)
+
+    def setup_outputs(self):
+        # 1. Create Output Directory for Masks
+        if not os.path.exists(MASK_OUTPUT_DIR):
+            print(f"Creating output directory: {MASK_OUTPUT_DIR}")
+            os.makedirs(MASK_OUTPUT_DIR)
+        
+        # 2. Create/Clear Log File
+        # Ensure parent dir exists
+        log_dir = os.path.dirname(LOG_FILE_PATH)
+        if not os.path.exists(log_dir):
+            os.makedirs(log_dir)
+            
+        # Initialize file with header
+        with open(LOG_FILE_PATH, "w") as f:
+            f.write("Filename, Timestamp, Detection_Note\n")
+        print(f"Log file initialized: {LOG_FILE_PATH}")
 
     def init_models(self):
         print("Initializing ONNX Sessions...")
@@ -128,56 +150,73 @@ class FusionPipeline:
         return road_pixels / total_pixels, intersection_mask
 
     def draw_performance_bars(self, frame, seg_ms, od_ms):
-        """
-        Draws compact latency bars in the bottom-left corner.
-        """
         h, w = frame.shape[:2]
-        
-        # Settings for small bars
         bar_height = 8 
-        bar_spacing = 15
-        max_width = 100  # Max width in pixels (for ~100ms)
+        max_width = 100
         start_x = 10
         start_y_seg = h - 30
         start_y_od  = h - 15
         
-        # 1. Backgrounds (Dark Grey)
         cv2.rectangle(frame, (start_x, start_y_seg), (start_x + max_width, start_y_seg + bar_height), (50, 50, 50), -1)
         cv2.rectangle(frame, (start_x, start_y_od),  (start_x + max_width, start_y_od + bar_height),  (50, 50, 50), -1)
         
-        # 2. Fill (1px = 1ms)
         w_seg = min(max_width, int(seg_ms))
         w_od  = min(max_width, int(od_ms))
         
-        cv2.rectangle(frame, (start_x, start_y_seg), (start_x + w_seg, start_y_seg + bar_height), (255, 191, 0), -1) # Blue
-        cv2.rectangle(frame, (start_x, start_y_od),  (start_x + w_od, start_y_od + bar_height),  (0, 255, 255), -1) # Yellow
+        cv2.rectangle(frame, (start_x, start_y_seg), (start_x + w_seg, start_y_seg + bar_height), (255, 191, 0), -1)
+        cv2.rectangle(frame, (start_x, start_y_od),  (start_x + w_od, start_y_od + bar_height),  (0, 255, 255), -1)
         
-        # 3. Text (Small font)
         font_scale = 0.4
         cv2.putText(frame, f"Seg: {seg_ms:.0f}ms", (start_x + max_width + 5, start_y_seg + bar_height), 
                     cv2.FONT_HERSHEY_SIMPLEX, font_scale, (200, 200, 200), 1)
         cv2.putText(frame, f"OD: {od_ms:.0f}ms",  (start_x + max_width + 5, start_y_od + bar_height), 
                     cv2.FONT_HERSHEY_SIMPLEX, font_scale, (200, 200, 200), 1)
 
+    def log_flagged_frame(self, filename, seg_mask):
+        """
+        Saves the mask and appends entry to the log file.
+        """
+        # 1. Save Mask
+        mask_filename = f"mask_{os.path.basename(filename)}"
+        save_path = os.path.join(MASK_OUTPUT_DIR, mask_filename)
+        # Scale mask (0/1) to (0/255) for visibility if needed, or keep raw
+        cv2.imwrite(save_path, seg_mask * 255) 
+        
+        # 2. Log to Text File
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(LOG_FILE_PATH, "a") as f:
+            f.write(f"{filename}, {timestamp}, Flagged\n")
+            
+        print(f"-> Saved Flag info for {filename}")
+
     def run(self):
         if '*' in VIDEO_SOURCE:
             from glob import glob
             files = sorted(glob(VIDEO_SOURCE))
             cap = None
-            print(f"Processing {len(files)} images...")
+            print(f"Processing {len(files)} images at {TARGET_FPS} FPS...")
         else:
             cap = cv2.VideoCapture(VIDEO_SOURCE)
             files = None
             print("Processing video stream...")
 
         idx = 0
+        wait_ms = int(1000 / TARGET_FPS)
+
         while True:
+            # Loop control for images
+            if not cap and idx >= len(files):
+                print("Finished processing all images.")
+                break
+
+            # Read Frame
             if cap:
                 ret, frame = cap.read()
                 if not ret: break
+                current_file = f"video_frame_{idx}.jpg"
             else:
-                if idx >= len(files): break
-                frame = cv2.imread(files[idx])
+                current_file = files[idx]
+                frame = cv2.imread(current_file)
                 idx += 1
             
             if frame is None: continue
@@ -202,14 +241,9 @@ class FusionPipeline:
             # --- 3. LOGIC & VISUALIZATION ---
             alert_triggered = False
             
-            # --- DISTANCE LINES (ADJUST THESE) ---
-            # Horizon / Far Line (Yellow)
-            line_far_y = int(h * 0.40) # 60% down from the top
-            cv2.line(frame, (0, line_far_y), (w, line_far_y), (0, 255, 255), 1)
-            
-            # Critical / Close Line (Red)
-            line_close_y = int(h * 0.85) # 85% down from the top
-            cv2.line(frame, (0, line_close_y), (w, line_close_y), (0, 0, 255), 2)
+            # Guidelines
+            cv2.line(frame, (0, int(h * 0.40)), (w, int(h * 0.40)), (0, 255, 255), 1)
+            cv2.line(frame, (0, int(h * 0.85)), (w, int(h * 0.85)), (0, 0, 255), 2)
             
             for i, box in enumerate(boxes):
                 overlap_ratio, overlap_mask = self.check_road_overlap(box, seg_mask_full)
@@ -219,10 +253,9 @@ class FusionPipeline:
                     label = f"OBS: {overlap_ratio*100:.0f}%"
                     alert_triggered = True
                     
-                    # Intersection Highlight (Purple)
+                    # Intersection Highlight
                     roi_color = np.zeros((box[3]-box[1], box[2]-box[0], 3), dtype=np.uint8)
                     roi_color[overlap_mask] = self.color_intrsct 
-                    
                     frame_roi = frame[box[1]:box[3], box[0]:box[2]]
                     mask_bool = overlap_mask.astype(bool)
                     if mask_bool.any():
@@ -231,32 +264,39 @@ class FusionPipeline:
                     color = self.color_ignored
                     label = f"IGN: {overlap_ratio*100:.0f}%"
 
-                # Draw Box
                 cv2.rectangle(frame, (box[0], box[1]), (box[2], box[3]), color, 2)
                 cv2.putText(frame, label, (box[0], box[1]-5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
 
-            # --- 4. GLOBAL UPDATES ---
+            # --- 4. FLAGGING & SAVING LOGIC ---
             if alert_triggered:
+                # Check cooldown
                 if (time.time() - self.last_alert_time) > ALERT_COOLDOWN:
-                    print(f"!!! CRITICAL OBSTACLE !!! Frame {idx}")
+                    print(f"!!! FLAGGED FRAME: {os.path.basename(current_file)} !!!")
+                    
+                    # 1. Visual Indicator
                     cv2.circle(frame, (30, 30), 15, (0, 0, 255), -1) 
+                    
+                    # 2. Log & Save Mask
+                    self.log_flagged_frame(current_file, seg_mask_full)
+                    
                     self.last_alert_time = time.time()
 
-            # Transparent Road Overlay
+            # Overlay
             color_mask = np.zeros_like(frame)
             color_mask[seg_mask_full == 1] = [0, 255, 0]
             frame = cv2.addWeighted(frame, 1.0, color_mask, 0.2, 0)
 
-            # Latency Bars
+            # Performance
             seg_ms = (t_seg_end - t_seg_start) * 1000
             od_ms  = (t_od_end - t_od_start) * 1000
             self.draw_performance_bars(frame, seg_ms, od_ms)
 
-            cv2.imshow("Fusion ADAS", frame)
+            cv2.imshow("Fusion ADAS Final Demo", frame)
             
-            key = cv2.waitKey(1 if cap else 0)
-            if key == ord('q'): break
-            if not cap and key == ord('d'): continue 
+            # --- AUTOMATIC 3 FPS ---
+            # Wait time in ms. Press 'q' to quit early.
+            if cv2.waitKey(wait_ms) == ord('q'):
+                break
 
         if cap: cap.release()
         cv2.destroyAllWindows()
