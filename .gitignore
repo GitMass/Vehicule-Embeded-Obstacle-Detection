@@ -12,7 +12,11 @@ test-imqges/
 myenv/
 .venv/
 
-*.onnx
-massyl/data/lost_and_found_left_od_optimized
+# massyl
 *.mp4
-massyl/data/bdd100k_test
+*.tar
+*.pth
+*.pt
+*.onnx
+embeded_obstacle_detection/data
+embeded_obstacle_detection/results
